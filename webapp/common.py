@@ -144,3 +144,13 @@ def dt(col: str) -> str:
 def num(col: str) -> str:
     """Biểu thức đọc cột số an toàn (cả khi cột đang là String)."""
     return f"toFloat64OrNull(toString({qi(col)}))"
+
+
+def ensure_cols(df: pd.DataFrame, cols: list) -> pd.DataFrame:
+    """Đảm bảo DataFrame có đủ các cột `cols`. Khi truy vấn trả về 0 dòng, thư viện có thể
+    trả về DataFrame rỗng không có tên cột, nên phải bổ sung để code phía sau không bị KeyError."""
+    df = df.copy()
+    for c in cols:
+        if c not in df.columns:
+            df[c] = pd.Series(dtype="object")
+    return df

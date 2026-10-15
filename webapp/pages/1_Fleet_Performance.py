@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from common import get_creds, resolve_table, run_query_slow
+from common import ensure_cols, get_creds, resolve_table, run_query_slow
 
 st.set_page_config(page_title="Fleet performance", layout="wide")
 creds = get_creds()
@@ -92,6 +92,11 @@ except Exception as e:
     st.error("Truy vấn bị lỗi.")
     st.code(str(e))
     st.stop()
+
+trip = ensure_cols(trip, ["tk", "mth", "miles", "trip_gal", "n_trips"])
+fuel = ensure_cols(fuel, ["tk", "mth", "fuel_gal"])
+deliv = ensure_cols(deliv, ["tk", "mth", "delivered", "on_time"])
+labels = ensure_cols(labels, ["tk", "unit"])
 
 # ---------------------------------------------------------------------------
 # Ghép dữ liệu, tính median, điểm và cờ

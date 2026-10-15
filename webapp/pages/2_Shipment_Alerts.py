@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from common import get_creds, resolve_table, run_query
+from common import ensure_cols, get_creds, resolve_table, run_query
 
 st.set_page_config(page_title="Shipment alerts", layout="wide")
 creds = get_creds()
@@ -103,7 +103,7 @@ def render():
           AND scheduled_datetime <= {REF} + INTERVAL {int(window_min)} MINUTE {lower}
     )"""
 
-    summary = run_query(
+    summary_df = run_query(
         f"""
         SELECT countIf(isNotNull(act)) AS delivered,
                countIf(ifNull(act > sched + INTERVAL {g} MINUTE, 0)) AS late,
@@ -112,7 +112,9 @@ def render():
         FROM {D} AS d
         """,
         creds,
-    ).iloc[0]
+    )
+    summary = ensure_cols(summary_df, ["delivered", "late", "overdue", "at_risk"]).fillna(0)
+    summary = summary.iloc[0] if len(summary) else pd.Series({"delivered": 0, "late": 0, "overdue": 0, "at_risk": 0})
 
     def feed_sql(with_joins: bool) -> str:
         if with_joins:
@@ -151,7 +153,12 @@ def render():
         st.caption(str(e)[:300])
         feed = run_query(feed_sql(False), creds)
 
-    # Tính số phút bằng pandas
+    # Tính số phút bằng pandas (feed có thể rỗng và không có tên cột nếu không có cảnh báo nào)
+    feed = ensure_cols(
+        feed,
+        ["event_id", "load_id", "trip_key", "facility_key", "sched", "act", "status",
+         "truck", "driver", "facility", "customer"],
+    )
     for c in ("sched", "act"):
         feed[c] = pd.to_datetime(feed[c], utc=True, errors="coerce")
     ref_ts = pd.Timestamp(ref, tz="UTC")

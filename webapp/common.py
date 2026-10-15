@@ -154,3 +154,18 @@ def ensure_cols(df: pd.DataFrame, cols: list) -> pd.DataFrame:
         if c not in df.columns:
             df[c] = pd.Series(dtype="object")
     return df
+
+
+def route_label_expr(creds: tuple, route_short: str) -> str:
+    """Biểu thức SQL tạo nhãn tuyến từ dim_route, ví dụ 'Dallas, TX -> Denver, CO'.
+    Dò các cột origin/destination, nếu không có thì dùng route_id."""
+    rc = table_columns(creds, route_short)
+    o_city, d_city = pick(rc, "origin_city", "origin"), pick(rc, "destination_city", "destination")
+    o_st, d_st = pick(rc, "origin_state"), pick(rc, "destination_state")
+    if o_city and d_city:
+        left = f"toString({qi(o_city)})" + (f", ', ', toString({qi(o_st)})" if o_st else "")
+        right = f"toString({qi(d_city)})" + (f", ', ', toString({qi(d_st)})" if d_st else "")
+        return f"concat({left}, ' -> ', {right})"
+    if pick(rc, "route_id"):
+        return f"toString({qi(pick(rc, 'route_id'))})"
+    return "toString(route_key)"

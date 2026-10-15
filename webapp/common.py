@@ -169,3 +169,31 @@ def route_label_expr(creds: tuple, route_short: str) -> str:
     if pick(rc, "route_id"):
         return f"toString({qi(pick(rc, 'route_id'))})"
     return "toString(route_key)"
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def table_schema(creds: tuple, table: str) -> dict:
+    """Trả về {tên cột: kiểu dữ liệu} của một bảng, theo đúng thứ tự cột."""
+    df = get_client(*creds).query_df(
+        "SELECT name, type FROM system.columns WHERE database = {db:String} AND table = {tb:String} ORDER BY position",
+        parameters={"db": creds[3], "tb": table},
+    )
+    return dict(zip(df["name"], df["type"])) if len(df) else {}
+
+
+def is_numeric_type(t: str) -> bool:
+    import re
+
+    prev = None
+    while prev != t:
+        prev = t
+        t = re.sub(r"^(Nullable|LowCardinality)\((.*)\)$", r"\2", t)
+    return t.startswith(("Int", "UInt", "Float", "Decimal"))
+
+
+def month_is_partial(month, max_date) -> bool:
+    """True nếu dữ liệu mới nhất chưa phủ hết tháng `month` (tháng đang diễn ra hoặc streaming chưa đủ ngày)."""
+    if max_date is None or pd.isna(max_date):
+        return False
+    month_end = (pd.Timestamp(month) + pd.offsets.MonthEnd(0)).normalize()
+    return pd.Timestamp(max_date).normalize() < month_end

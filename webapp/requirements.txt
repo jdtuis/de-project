@@ -3,3 +3,4 @@ altair
 clickhouse-connect
 pandas
 numpy
+pyarrow<25

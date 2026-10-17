@@ -4,6 +4,7 @@ import os
 
 import clickhouse_connect
 import pandas as pd
+from clickhouse_connect.driver.exceptions import ProgrammingError
 import streamlit as st
 
 
@@ -59,11 +60,28 @@ def get_client(host: str, user: str, password: str, database: str):
         database=database,
         connect_timeout=15,
         send_receive_timeout=120,
+        # Client này được dùng chung cho mọi trang và mọi phiên trình duyệt. Mặc định thư viện gắn session_id cho
+        # client và chỉ cho chạy một truy vấn mỗi lúc, nên phải tắt để nhiều truy vấn chạy song song được.
+        autogenerate_session_id=False,
     )
 
 
 def _query(sql: str, creds: tuple) -> pd.DataFrame:
-    return get_client(*creds).query_df(sql)
+    try:
+        return get_client(*creds).query_df(sql)
+    except ProgrammingError as e:
+        if "concurrent" not in str(e):
+            raise
+        # Phòng khi vẫn bị chạy song song: dùng một client riêng, không dùng chung, cho truy vấn này
+        host, user, password, database = creds
+        own = clickhouse_connect.get_client(
+            host=host, port=8443, username=user, password=password, secure=True, database=database,
+            connect_timeout=15, send_receive_timeout=120, autogenerate_session_id=False,
+        )
+        try:
+            return own.query_df(sql)
+        finally:
+            own.close()
 
 
 @st.cache_data(ttl=10, show_spinner=False)

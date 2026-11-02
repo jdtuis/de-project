@@ -1,11 +1,12 @@
 """Hàm dùng chung cho các trang: kết nối ClickHouse, tìm bảng và cột."""
 
 import os
+import time
 
 import clickhouse_connect
 import pandas as pd
-from clickhouse_connect.driver.exceptions import ProgrammingError
 import streamlit as st
+from clickhouse_connect.driver.exceptions import OperationalError, ProgrammingError
 
 
 def clean_host(h: str) -> str:
@@ -30,7 +31,42 @@ def _defaults() -> dict:
     }
 
 
+def show_connection_error(e: Exception):
+    """Giải thích lỗi kết nối bằng lời và cho phép thử lại."""
+    st.error("Không kết nối được tới ClickHouse Cloud.")
+    st.markdown(
+        "Lỗi này nằm ở đường kết nối mạng, không phải ở code hay dữ liệu. Kiểm tra lần lượt:\n\n"
+        "1. **Dịch vụ đang tạm dừng.** Gói dùng thử của ClickHouse Cloud tự dừng khi không có truy vấn. "
+        "Vào https://console.clickhouse.cloud, mở service, kiểm tra trạng thái (Running, Idle hoặc Stopped), "
+        "chạy một truy vấn bất kỳ để đánh thức, chờ khoảng một phút rồi bấm **Thử lại**.\n"
+        "2. **Danh sách IP được phép (IP Access List).** Streamlit Cloud không có IP cố định, nên service phải cho phép "
+        "truy cập từ mọi nơi (Settings > Security > IP access list).\n"
+        "3. **Thông tin kết nối.** Kiểm tra `host`, `user`, `password` trong Settings > Secrets của app Streamlit "
+        "(host không có `https://`)."
+    )
+    if st.button("Thử lại"):
+        get_client.clear()
+        st.rerun()
+    root = e
+    while root.__cause__ is not None:
+        root = root.__cause__
+    with st.expander("Chi tiết kỹ thuật"):
+        st.code(f"{type(e).__name__}\nNguyên nhân gốc: {type(root).__name__}", language="text")
+
+
 def get_creds() -> tuple:
+    """Lấy thông tin kết nối rồi kiểm tra kết nối. Nếu ClickHouse không truy cập được thì hiện hướng dẫn và dừng trang
+    (Streamlit Cloud ẩn nội dung lỗi chưa được bắt, nên phải bắt ở đây)."""
+    creds = _resolve_creds()
+    try:
+        get_client(*creds)
+    except OperationalError as e:
+        show_connection_error(e)
+        st.stop()
+    return creds
+
+
+def _resolve_creds() -> tuple:
     """Lấy thông tin kết nối từ secrets / biến môi trường, nếu thiếu thì hỏi ở thanh bên."""
     d = _defaults()
     if d["host"] and d["password"]:
@@ -49,26 +85,40 @@ def get_creds() -> tuple:
     return (host, user, password, database)
 
 
-@st.cache_resource
+@st.cache_resource(show_spinner="Đang kết nối ClickHouse Cloud...")
 def get_client(host: str, user: str, password: str, database: str):
-    return clickhouse_connect.get_client(
-        host=host,
-        port=8443,
-        username=user,
-        password=password,
-        secure=True,
-        database=database,
-        connect_timeout=15,
-        send_receive_timeout=120,
-        # Client này được dùng chung cho mọi trang và mọi phiên trình duyệt. Mặc định thư viện gắn session_id cho
-        # client và chỉ cho chạy một truy vấn mỗi lúc, nên phải tắt để nhiều truy vấn chạy song song được.
-        autogenerate_session_id=False,
-    )
+    """Tạo client dùng chung. Dịch vụ ClickHouse Cloud ở gói dùng thử tự tạm dừng khi không có truy vấn và cần vài chục
+    giây để khởi động lại, trong lúc đó kết nối TLS có thể bị đóng ngay (SSLEOFError), nên thử lại vài lần trước khi báo lỗi."""
+    last = None
+    for attempt in range(4):
+        try:
+            return clickhouse_connect.get_client(
+                host=host,
+                port=8443,
+                username=user,
+                password=password,
+                secure=True,
+                database=database,
+                connect_timeout=15,
+                send_receive_timeout=120,
+                # Client này được dùng chung cho mọi trang và mọi phiên trình duyệt. Mặc định thư viện gắn session_id cho
+                # client và chỉ cho chạy một truy vấn mỗi lúc, nên phải tắt để nhiều truy vấn chạy song song được.
+                autogenerate_session_id=False,
+            )
+        except OperationalError as e:
+            last = e
+            if attempt < 3:
+                time.sleep(5 * (attempt + 1))  # 5s, 10s, 15s
+    raise last
 
 
-def _query(sql: str, creds: tuple) -> pd.DataFrame:
+def _query(sql: str, creds: tuple, params: dict | None = None) -> pd.DataFrame:
     try:
-        return get_client(*creds).query_df(sql)
+        return get_client(*creds).query_df(sql, parameters=params)
+    except OperationalError:
+        # Kết nối đã lưu có thể bị đứt (dịch vụ tạm dừng rồi chạy lại): xóa client cũ và thử một lần nữa
+        get_client.clear()
+        return get_client(*creds).query_df(sql, parameters=params)
     except ProgrammingError as e:
         if "concurrent" not in str(e):
             raise
@@ -79,7 +129,7 @@ def _query(sql: str, creds: tuple) -> pd.DataFrame:
             connect_timeout=15, send_receive_timeout=120, autogenerate_session_id=False,
         )
         try:
-            return own.query_df(sql)
+            return own.query_df(sql, parameters=params)
         finally:
             own.close()
 
@@ -98,18 +148,15 @@ def run_query_slow(sql: str, creds: tuple) -> pd.DataFrame:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _list_tables(creds: tuple) -> list:
-    df = get_client(*creds).query_df(
-        "SELECT name FROM system.tables WHERE database = {db:String}",
-        parameters={"db": creds[3]},
-    )
+    df = _query("SELECT name FROM system.tables WHERE database = {db:String}", creds, {"db": creds[3]})
     return df["name"].tolist()
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def table_columns(creds: tuple, table: str) -> list:
-    df = get_client(*creds).query_df(
+    df = _query(
         "SELECT name FROM system.columns WHERE database = {db:String} AND table = {tb:String} ORDER BY position",
-        parameters={"db": creds[3], "tb": table},
+        creds, {"db": creds[3], "tb": table},
     )
     return df["name"].tolist()
 
@@ -192,9 +239,9 @@ def route_label_expr(creds: tuple, route_short: str) -> str:
 @st.cache_data(ttl=300, show_spinner=False)
 def table_schema(creds: tuple, table: str) -> dict:
     """Trả về {tên cột: kiểu dữ liệu} của một bảng, theo đúng thứ tự cột."""
-    df = get_client(*creds).query_df(
+    df = _query(
         "SELECT name, type FROM system.columns WHERE database = {db:String} AND table = {tb:String} ORDER BY position",
-        parameters={"db": creds[3], "tb": table},
+        creds, {"db": creds[3], "tb": table},
     )
     return dict(zip(df["name"], df["type"])) if len(df) else {}
 
